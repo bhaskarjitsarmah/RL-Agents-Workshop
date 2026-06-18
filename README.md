@@ -34,7 +34,7 @@ and the learning signal is verbal/evolutionary feedback instead of gradients.
 | **NB0** | **Build your first agent (and meet the harness)** | **built** |
 | **NB1** | **The eval interface (V) + measuring your agent** | **built** |
 | **NB2** | **Reflexion: reflection is the gradient** | **built** |
-| NB3 | The skill lifecycle (generate -> extract -> consume) + the 25%-degrade trap | planned |
+| **NB3** | **The skill lifecycle (generate -> extract -> consume) + the 25%-degrade trap** | **built** |
 | NB4 | SkillOpt: train the skill document like a neural net | planned |
 | NB5 | Hierarchical skill library + strong->weak transfer | planned |
 | NB6 | Capstone: self-evolving, auditable agent (EvoSkill + ASG-SI) | planned |
@@ -97,6 +97,7 @@ RL-Agents-Workshop/
     NB0_build_your_first_agent.ipynb
     NB1_eval_interface_and_baseline.ipynb
     NB2_reflexion.ipynb
+    NB3_skill_lifecycle.ipynb
   build_notebooks.py     regenerates the notebooks from plain-text cell defs
   requirements.txt
   .env.example

@@ -528,8 +528,305 @@ of them into every prompt. The skill-optimization papers fix exactly this:
 ]
 
 
+# ============================================================================
+# NB3 -- The Skill Lifecycle: generate -> extract -> consume
+# ============================================================================
+
+NB3 = [
+    md(r"""
+# NB3 - The Skill Lifecycle: Generate -> Extract -> Consume
+
+**Workshop: Self-Evolving Agents by Optimizing the Harness (no GPU)**
+
+In NB2 the agent learned - but its memory was **unstructured free text**,
+**unvalidated**, and we **dumped all of it** into every prompt. That doesn't
+scale and it can backfire. NB3 turns raw experience into a proper **skill
+library**: the trainable state of our frozen agent.
+
+We follow the skill **lifecycle** from the Microsoft/Fudan study:
+
+1. **Generate** - run the agent, collect trajectories (which tasks it solved).
+2. **Extract** - distill **structured skills**, and crucially *only from
+   **successful** experience* (capture what worked, not just what to avoid).
+3. **Consume** - **retrieve** the few relevant skills per question and inject them.
+
+Two hard-won disciplines from that study, which we'll *demonstrate*, not just state:
+- **~25% of skills can *degrade* performance.** More skills is not better. You
+  need a quality **gate**.
+- A short **meta-skill rubric** (generality / correctness / actionability) is the
+  gate that keeps the junk out.
+"""),
+    code(r"""
+import sys, os, json, re
+sys.path.insert(0, os.path.abspath(".."))
+from workshop_utils import (
+    build_db, load_tasks, score_sql, evaluate,
+    llm, METER, SCHEMA_TEXT, extract_sql, baseline_prompt, make_agent,
+)
+build_db()
+agent = make_agent()      # the NB0 agent (no skills yet)
+
+try:
+    baseline_acc = json.load(open("../data/baseline_test.json"))["accuracy"]
+except FileNotFoundError:
+    baseline_acc = evaluate(agent, split="test")["accuracy"]
+print("baseline test accuracy:", round(baseline_acc, 3))
+"""),
+    md(r"""
+## 1. What is a "skill"?
+
+Not a sentence - a **structured, retrievable object**: a *name*, a *trigger*
+(when to use it), and a general *pattern*. Structure is what lets us retrieve the
+right skill later and score its quality.
+"""),
+    code(r"""
+example_skill = {
+    "name": "completed_revenue",
+    "when_to_use": "the question asks for revenue/sales and only completed orders should count",
+    "pattern": "JOIN order_items -> orders -> products; revenue = SUM(order_items.quantity*products.price); filter WHERE orders.status='completed'",
+}
+for k, v in example_skill.items():
+    print(f"{k:>12}: {v}")
+"""),
+    md(r"""
+## 2. Generate - collect trajectories on the train split
+
+Run the agent on train tasks and record what it **solved** vs **missed**. The
+skills will come from the *solved* ones.
+"""),
+    code(r"""
+train = [t for t in load_tasks() if t["split"] == "train"]
+METER.reset()
+successes, failures = [], []
+for t in train:
+    sql = agent(t["question"])
+    rec = {"question": t["question"], "sql": sql, "gold": t["gold"], "level": t["level"]}
+    (successes if score_sql(sql, t["gold"]) else failures).append(rec)
+print(f"train: {len(successes)} solved, {len(failures)} missed")
+print(METER)
+"""),
+    md(r"""
+## 3. Extract - distill skills from SUCCESS (not just failure)
+
+NB2 learned from mistakes ("don't do X"). The study's key finding is that the
+*reliable* skills come from **successful** trajectories - they capture a pattern
+that actually worked. We also skip the trivial *easy* wins: a `SELECT ... WHERE`
+is not worth a skill. We extract from **medium/hard successes** only.
+"""),
+    code(r"""
+SKILL_SYS = (
+    "You turn a SOLVED text-to-SQL example into a reusable SKILL for a frozen agent. "
+    "Return STRICT JSON with keys: name, when_to_use, pattern. "
+    "'when_to_use' is a trigger for the CLASS of questions (no specific values). "
+    "'pattern' is the general SQL technique (joins/filters/aggregation), not the literal query. "
+    "Generalize; never mention the specific question."
+)
+
+def parse_json_obj(raw):
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return None
+
+def extract_skill(rec):
+    raw = llm([
+        {"role": "system", "content": SKILL_SYS},
+        {"role": "user", "content":
+            "Schema:\n" + SCHEMA_TEXT +
+            "\nSolved question: " + rec["question"] +
+            "\nCorrect SQL:\n" + rec["sql"] +
+            "\n\nReturn the skill as JSON."},
+    ])
+    d = parse_json_obj(raw)
+    if not d or not all(k in d for k in ("name", "when_to_use", "pattern")):
+        return None
+    return {k: str(d[k]) for k in ("name", "when_to_use", "pattern")}
+
+rich = [r for r in successes if r["level"] in ("medium", "hard")]
+METER.reset()
+candidate_skills = []
+for rec in rich:
+    s = extract_skill(rec)
+    if s:
+        candidate_skills.append(s)
+# de-duplicate by name (keep first)
+dedup = {}
+for s in candidate_skills:
+    dedup.setdefault(s["name"], s)
+candidate_skills = list(dedup.values())
+
+print(f"extracted {len(candidate_skills)} skills from {len(rich)} medium/hard wins\n")
+for s in candidate_skills:
+    print(f"- {s['name']}: USE WHEN {s['when_to_use']}")
+print("\n", METER)
+"""),
+    md(r"""
+## 4. Consume - retrieve only the relevant skills
+
+Dumping the whole library into every prompt wastes tokens and invites
+interference. Instead we **retrieve** the top-k skills whose trigger overlaps the
+question (a simple lexical match here; NB5 upgrades to a hierarchical library).
+"""),
+    code(r"""
+def format_skills(skills):
+    if not skills:
+        return ""
+    lines = ["Relevant skills (reusable patterns from past solved tasks):"]
+    for s in skills:
+        lines.append(f"- {s['name']}: USE WHEN {s['when_to_use']}. PATTERN: {s['pattern']}")
+    return "\n".join(lines)
+
+_WORD = re.compile(r"[a-z]+")
+def _tokens(text):
+    return set(_WORD.findall(text.lower()))
+
+def retrieve(question, skills, k=3):
+    q = _tokens(question)
+    scored = [(len(q & _tokens(s["name"] + " " + s["when_to_use"])), s) for s in skills]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [s for ov, s in scored[:k] if ov > 0]
+
+def make_skill_agent(skills, k=3):
+    # Same NB0 harness; per question we inject only the retrieved skills (C <- S).
+    def agent_fn(question):
+        return make_agent(extra=format_skills(retrieve(question, skills, k)))(question)
+    return agent_fn
+
+# Sanity check: what does retrieval pick for a revenue question?
+demo_q = "Which product generated the most completed revenue?"
+print("retrieved for:", demo_q)
+for s in retrieve(demo_q, candidate_skills, k=3):
+    print("  -", s["name"])
+"""),
+    md(r"""
+## 5. The 25%-degrade trap
+
+Any real extraction pipeline also produces **junk** - over-general or wrong
+skills. Here we add two plausible-but-harmful ones (exactly the kind a careless
+pipeline would keep) and **dump the whole unvetted pool** into every prompt. Watch
+the score fail to improve - or drop below baseline.
+"""),
+    code(r"""
+junk_skills = [
+    {"name": "always_limit", "when_to_use": "any question",
+     "pattern": "add LIMIT 1 to every query to be safe"},
+    {"name": "subquery_everything", "when_to_use": "any aggregation",
+     "pattern": "wrap every aggregate in a nested subquery"},
+]
+unvetted = candidate_skills + junk_skills
+
+def make_dump_agent(skills):
+    block = format_skills(skills)            # same big block for every question
+    return make_agent(extra=block)
+
+METER.reset()
+acc_dump = evaluate(make_dump_agent(unvetted), split="test")["accuracy"]
+print("baseline (no skills) :", round(baseline_acc, 3))
+print("ALL skills, dumped   :", round(acc_dump, 3), " <- unvetted + no retrieval")
+print(METER)
+"""),
+    md(r"""
+## 6. The gate - a 3-dimension meta-skill rubric
+
+Before a skill enters the library, score it on three dimensions (each 0-2):
+
+- **generality** - applies to many future questions, not one special case
+- **correctness** - the SQL advice is actually true for this schema
+- **actionability** - concrete enough to change the query the agent writes
+
+We admit a skill only if **no dimension is a 0**. The junk skills should fail.
+"""),
+    code(r"""
+RUBRIC_SYS = (
+    "You are a strict reviewer of agent SKILLS for a text-to-SQL agent. "
+    "Score the skill on three dimensions, each an integer 0-2 (0 bad, 2 great): "
+    "generality (applies to many future questions, not one case), "
+    "correctness (the SQL advice is actually true for this schema), "
+    "actionability (concrete enough to change the query written). "
+    "Return STRICT JSON with integer keys generality, correctness, actionability "
+    "and a short string key reason."
+)
+
+def score_skill(s):
+    raw = llm([
+        {"role": "system", "content": RUBRIC_SYS},
+        {"role": "user", "content":
+            "Schema:\n" + SCHEMA_TEXT +
+            f"\nSkill:\nname: {s['name']}\nwhen_to_use: {s['when_to_use']}\npattern: {s['pattern']}\n\nScore it."},
+    ])
+    d = parse_json_obj(raw) or {}
+    return {dim: int(d.get(dim, 0) or 0) for dim in ("generality", "correctness", "actionability")}
+
+METER.reset()
+curated = []
+for s in unvetted:
+    sc = score_skill(s)
+    ok = min(sc.values()) >= 1
+    print(f"{'KEEP' if ok else 'DROP'}  {s['name']:<22} "
+          f"g{sc['generality']} c{sc['correctness']} a{sc['actionability']}")
+    if ok:
+        curated.append(s)
+print(f"\nkept {len(curated)}/{len(unvetted)} skills after the gate")
+print(METER)
+"""),
+    md(r"""
+## 7. The payoff - structure + gate + retrieval
+
+Now run the **curated** library with **retrieval** and compare the three regimes.
+"""),
+    code(r"""
+METER.reset()
+acc_curated = evaluate(make_skill_agent(curated, k=3), split="test")["accuracy"]
+print("baseline (no skills)      :", round(baseline_acc, 3))
+print("ALL skills dumped         :", round(acc_dump, 3))
+print("curated + retrieved (NB3) :", round(acc_curated, 3))
+print(METER)
+"""),
+    code(r"""
+import matplotlib.pyplot as plt
+labels = ["baseline\n(NB0)", "all skills\ndumped", "curated +\nretrieved"]
+vals = [baseline_acc, acc_dump, acc_curated]
+plt.figure(figsize=(6, 4))
+bars = plt.bar(labels, vals, color=["gray", "indianred", "seagreen"])
+plt.ylim(0, 1)
+plt.ylabel("test accuracy")
+plt.title("Skill lifecycle: a gated, retrieved library beats dump-everything")
+for b, v in zip(bars, vals):
+    plt.text(b.get_x() + b.get_width() / 2, v + 0.02, f"{v:.2f}", ha="center")
+plt.show()
+"""),
+    md(r"""
+## Takeaways
+
+- A **skill** is structured (name / trigger / pattern), so it can be **retrieved**
+  and **scored** - unlike NB2's free-text lessons.
+- The lifecycle is **generate -> extract -> consume**, and you **extract from
+  successes**, not only failures.
+- **More skills is not better.** An unvetted pool degrades; a small **rubric gate**
+  (generality / correctness / actionability) keeps the library clean.
+- Retrieval means each prompt sees only the few skills it needs.
+
+### The gap this leaves (-> NB4)
+We curated with a *one-shot* rubric and a hand-set threshold. We never **optimized**
+the library: no learning rate, no held-out **validation gate**, no momentum. NB4
+(**SkillOpt**) treats the skill document as a trainable parameter and tunes it the
+way you'd train a neural net - so improvement is systematic, not lucky.
+
+### Exercise
+1. Lower the gate to "average >= 1" instead of "min >= 1". Do more skills slip
+   through, and does test accuracy fall? You just felt the 25%-degrade trap.
+2. Replace lexical `retrieve` with embeddings (e.g. cosine over `text-embedding-3-small`).
+   Does retrieval quality improve on the harder questions?
+"""),
+]
+
+
 if __name__ == "__main__":
     build(os.path.join(NB_DIR, "NB0_build_your_first_agent.ipynb"), NB0)
     build(os.path.join(NB_DIR, "NB1_eval_interface_and_baseline.ipynb"), NB1)
     build(os.path.join(NB_DIR, "NB2_reflexion.ipynb"), NB2)
+    build(os.path.join(NB_DIR, "NB3_skill_lifecycle.ipynb"), NB3)
     print("done")
