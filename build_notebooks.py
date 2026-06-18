@@ -407,7 +407,7 @@ from workshop_utils import (
     llm, METER, SCHEMA_TEXT, extract_sql, baseline_prompt, make_agent,
     preflight, flush,
 )
-preflight()               # hard-require OPENAI + LANGFUSE keys (see SETUP.md)
+preflight("WANDB_API_KEY")  # OPENAI + LANGFUSE + W&B keys (see SETUP.md)
 build_db()
 agent = make_agent()      # the NB0 agent (no memory yet)
 
@@ -468,8 +468,15 @@ print("\n", METER)
 `make_agent(extra=...)` reuses the *same* NB0 harness, but now we prepend the
 learned lessons to the context (**C**). We grow the memory in steps and re-measure
 **test** each time - the "learning curve" of a self-evolving agent.
+
+We treat this exactly like a model training run and log it to **Weights &
+Biases**: each added lesson is a "step", and the held-out test accuracy is the
+metric. This is the same pattern you'd use to track a real fine-tune - here the
+"training" is happening in text space.
 """),
     code(r"""
+import wandb
+
 def memory_block(lessons):
     if not lessons:
         return ""
@@ -480,14 +487,27 @@ def make_memory_agent(lessons):
     # Same harness as NB0, with memory (S) injected into the context (C).
     return make_agent(extra=memory_block(lessons))
 
+# Open a W&B run; lessons_in_memory is our x-axis (the "training step").
+run = wandb.init(project="rl-agents-workshop", name="nb2-reflexion",
+                 config={"model": "gpt-4o-mini", "n_train": len(train),
+                         "n_lessons": len(lessons)})
+wandb.define_metric("lessons_in_memory")
+wandb.define_metric("test_accuracy", step_metric="lessons_in_memory")
+
 checkpoints = sorted(set([0, len(lessons) // 3, 2 * len(lessons) // 3, len(lessons)]))
 curve = []
 METER.reset()
 for k in checkpoints:
     acc = evaluate(make_memory_agent(lessons[:k]), split="test")["accuracy"]
     curve.append((k, acc))
+    wandb.log({"lessons_in_memory": k, "test_accuracy": acc})
     print("lessons in memory = %2d   test accuracy = %.3f" % (k, acc))
+
+wandb.summary["baseline_acc"] = baseline_acc
+wandb.summary["final_acc"] = curve[-1][1]
+wandb.summary["est_cost_usd"] = METER.cost()
 print("\n", METER)
+print("W&B run:", run.url)
 """),
     code(r"""
 import matplotlib.pyplot as plt
@@ -516,7 +536,10 @@ bad_lessons = ["To be safe, always add LIMIT 1 to every query.",
                "Always wrap every aggregate in a subquery."]
 polluted = evaluate(make_memory_agent(lessons + bad_lessons * 2), split="test")["accuracy"]
 print("clean memory:", round(curve[-1][1], 3), " ->  polluted memory:", round(polluted, 3))
-flush()                   # ship traces to Langfuse
+
+wandb.summary["polluted_acc"] = polluted      # record the failure mode on the run
+wandb.finish()                                # close the W&B run
+flush()                                       # ship traces to Langfuse
 """),
     md(r"""
 ## Takeaways
@@ -525,6 +548,9 @@ flush()                   # ship traces to Langfuse
   weight updates - only the harness (state **S** + context **C**) changed.
 - Memory turns a one-shot agent into one that **learns from its own mistakes**.
 - Self-evolution can go **backwards** (memory pollution). You need a gate.
+- We tracked the whole thing in **Weights & Biases** like any training run - the
+  learning curve, the baseline, the cost, and the pollution result all live on one
+  run you can share and compare. NB4 reuses this to track SkillOpt.
 
 ### The gap this leaves (-> NB3, NB4)
 These lessons are **unstructured free text**, **unvalidated**, and we dump *all*
