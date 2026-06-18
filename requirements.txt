@@ -1,0 +1,9 @@
+# Core dependencies for NB1 + NB2 (eval interface, baseline, Reflexion)
+openai>=1.30
+python-dotenv>=1.0
+matplotlib>=3.7
+nbformat>=5.9
+
+# Used from later notebooks (NB3+); safe to install now or later
+# chromadb>=0.5        # episodic memory / skill retrieval (NB3, NB5)
+# dspy-ai>=2.4         # optional production tooling path for SkillOpt (NB4)

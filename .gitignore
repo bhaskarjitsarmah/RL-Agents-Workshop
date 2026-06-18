@@ -1,0 +1,33 @@
+# --- Secrets: NEVER commit real keys ---
+.env
+.env.local
+*.key
+
+# --- Generated workshop artifacts (rebuilt by the notebooks) ---
+# data/shop.db is rebuilt deterministically by build_db(); baseline_test.json is written when NB1 runs.
+data/*.db
+data/*.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
