@@ -10,16 +10,18 @@ its prompt, memory, examples, tools, and - the headline - its **skill library**.
 
 ## The framing
 
-We use the agent-harness formalism **H = (E, T, C, S, L, V)**:
+We use the agent-harness formalism **H = (E, T, C, S, L, V)**. In **NB0** we
+*build* the first agent - the initial execution loop (E), tool (T) and context
+(C). Every notebook after that **evolves** one part of the harness:
 
-| | Component | What we evolve | Notebook |
-|---|---|---|---|
-| E | Execution loop | the self-evolution outer loop | NB6 |
-| T | Tool registry | self-built, hierarchical skill library | NB5 |
-| C | Context manager | reflections -> distilled skills | NB2, NB3 |
-| S | State store | persisted, versioned, audited skills | NB2, NB6 |
-| L | Lifecycle hooks | validation gates around skill promotion | NB4 |
-| V | Evaluation interface | the reward signal (prerequisite for all) | NB1 |
+| | Component | First built | What we evolve | Notebook |
+|---|---|---|---|---|
+| E | Execution loop | NB0 | the self-evolution outer loop | NB6 |
+| T | Tool registry | NB0 | self-built, hierarchical skill library | NB5 |
+| C | Context manager | NB0 | reflections -> distilled skills | NB2, NB3 |
+| S | State store | - | persisted, versioned, audited skills | NB2, NB6 |
+| L | Lifecycle hooks | NB0 | validation gates around skill promotion | NB4 |
+| V | Evaluation interface | - | the reward signal (prerequisite for all) | NB1 |
 
 This is **Reinforcement Learning for LLM agents**, but the policy is the harness
 and the learning signal is verbal/evolutionary feedback instead of gradients.
@@ -29,7 +31,8 @@ and the learning signal is verbal/evolutionary feedback instead of gradients.
 | # | Module | Status |
 |---|---|---|
 | M0 | Harness anatomy & the thesis (slides) | - |
-| **NB1** | **The eval interface (V) + frozen baseline** | **built** |
+| **NB0** | **Build your first agent (and meet the harness)** | **built** |
+| **NB1** | **The eval interface (V) + measuring your agent** | **built** |
 | **NB2** | **Reflexion: reflection is the gradient** | **built** |
 | NB3 | The skill lifecycle (generate -> extract -> consume) + the 25%-degrade trap | planned |
 | NB4 | SkillOpt: train the skill document like a neural net | planned |
@@ -74,8 +77,9 @@ train and report on test - never the other way around.
 ## Cost
 
 Harness optimization is API-call-heavy, so every notebook prints a **cost meter**
-(calls / tokens / approximate USD). On `gpt-4o-mini` a full run of NB1+NB2 is a
-few cents. Tune `max_tries` and the train-set size to control spend.
+(calls / tokens / approximate USD). On `gpt-4o-mini` a full run of NB0+NB1+NB2 is
+a few cents. Tune `max_repairs` (the agent's retry loop) and the train-set size
+to control spend.
 
 ## Repo layout
 
@@ -86,10 +90,11 @@ RL-Agents-Workshop/
     db.py                toy DB builder + execution-match scorer (the reward V)
     tasks.py             40 NL -> gold SQL tasks (train/test)
     evaluate.py          the eval harness (component V)
-    agents.py            extract_sql + zero-shot baseline agent
+    agents.py            extract_sql, baseline prompt, and make_agent (the looped agent)
   data/
     shop.db              generated deterministically (safe to delete/rebuild)
   notebooks/
+    NB0_build_your_first_agent.ipynb
     NB1_eval_interface_and_baseline.ipynb
     NB2_reflexion.ipynb
   build_notebooks.py     regenerates the notebooks from plain-text cell defs

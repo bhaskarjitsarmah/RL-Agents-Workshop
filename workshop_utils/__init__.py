@@ -15,7 +15,9 @@ Public API:
 from .llm import llm, METER, CostMeter
 from .db import build_db, load_tasks, score_sql, run_sql, DB_PATH, SCHEMA_TEXT
 from .evaluate import evaluate
-from .agents import extract_sql, baseline_prompt, make_baseline_agent
+from .agents import (
+    extract_sql, baseline_prompt, make_baseline_agent, make_agent, repair_prompt,
+)
 
 __all__ = [
     "llm",
@@ -31,4 +33,6 @@ __all__ = [
     "extract_sql",
     "baseline_prompt",
     "make_baseline_agent",
+    "make_agent",
+    "repair_prompt",
 ]
