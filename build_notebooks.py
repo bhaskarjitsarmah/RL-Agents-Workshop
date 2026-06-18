@@ -66,12 +66,19 @@ sys.path.insert(0, os.path.abspath(".."))
 
 from workshop_utils import (
     build_db, run_sql, llm, METER, SCHEMA_TEXT, extract_sql, baseline_prompt,
+    preflight, flush,
 )
 
+preflight()              # hard-require OPENAI + LANGFUSE keys (see SETUP.md)
 DB = build_db()          # deterministic rebuild; same data on every machine
 print("Database ready at:", DB)
 """),
     md(r"""
+> **Observability is on.** From here, *every* `llm()` call is traced to
+> **Langfuse** - open your project at the `LANGFUSE_BASE_URL` you configured and
+> you'll see each call appear live. That dashboard is how a real team inspects an
+> agent's behaviour, cost, and latency; we'll lean on it throughout.
+
 ## Move 1 - The brain, alone
 
 The simplest thing we can do is ask the LLM for SQL with **no schema and no
@@ -175,6 +182,9 @@ from workshop_utils import make_agent
 agent = make_agent()
 print(agent("List the names of customers in the Enterprise segment."))
 print("\n", METER)
+flush()                  # send the buffered traces to Langfuse
+# Open Langfuse now: you'll see a `sql_agent` trace per question, with the
+# initial call and any repair calls nested inside it - that's the trajectory.
 """),
     md(r"""
 ## Takeaways
@@ -226,8 +236,10 @@ sys.path.insert(0, os.path.abspath(".."))
 from workshop_utils import (
     build_db, load_tasks, run_sql, score_sql, evaluate,
     llm, METER, SCHEMA_TEXT, extract_sql, baseline_prompt, make_agent,
+    preflight, flush,
 )
 
+preflight()              # hard-require OPENAI + LANGFUSE keys (see SETUP.md)
 DB = build_db()          # deterministic rebuild; same data on every machine
 print("Database ready at:", DB)
 """),
@@ -339,6 +351,7 @@ with open("../data/baseline_test.json", "w", encoding="utf-8") as f:
         f, indent=2,
     )
 print("saved baseline_test.json")
+flush()                  # ship the eval traces to Langfuse
 """),
     md(r"""
 ## Takeaways
@@ -392,7 +405,9 @@ sys.path.insert(0, os.path.abspath(".."))
 from workshop_utils import (
     build_db, load_tasks, run_sql, score_sql, evaluate,
     llm, METER, SCHEMA_TEXT, extract_sql, baseline_prompt, make_agent,
+    preflight, flush,
 )
+preflight()               # hard-require OPENAI + LANGFUSE keys (see SETUP.md)
 build_db()
 agent = make_agent()      # the NB0 agent (no memory yet)
 
@@ -501,6 +516,7 @@ bad_lessons = ["To be safe, always add LIMIT 1 to every query.",
                "Always wrap every aggregate in a subquery."]
 polluted = evaluate(make_memory_agent(lessons + bad_lessons * 2), split="test")["accuracy"]
 print("clean memory:", round(curve[-1][1], 3), " ->  polluted memory:", round(polluted, 3))
+flush()                   # ship traces to Langfuse
 """),
     md(r"""
 ## Takeaways
@@ -562,7 +578,9 @@ sys.path.insert(0, os.path.abspath(".."))
 from workshop_utils import (
     build_db, load_tasks, score_sql, evaluate,
     llm, METER, SCHEMA_TEXT, extract_sql, baseline_prompt, make_agent,
+    preflight, flush,
 )
+preflight()               # hard-require OPENAI + LANGFUSE keys (see SETUP.md)
 build_db()
 agent = make_agent()      # the NB0 agent (no skills yet)
 
@@ -797,6 +815,7 @@ plt.title("Skill lifecycle: a gated, retrieved library beats dump-everything")
 for b, v in zip(bars, vals):
     plt.text(b.get_x() + b.get_width() / 2, v + 0.02, f"{v:.2f}", ha="center")
 plt.show()
+flush()                   # ship traces to Langfuse
 """),
     md(r"""
 ## Takeaways

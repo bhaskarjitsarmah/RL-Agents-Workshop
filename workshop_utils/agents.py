@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 
 from .db import SCHEMA_TEXT, run_sql
-from .llm import llm
+from .llm import llm, observe
 
 # Matches a ```sql ... ``` or ``` ... ``` fenced block.
 _FENCE = re.compile(r"```(?:sql)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -113,7 +113,10 @@ def make_agent(model: str | None = None, extra: str = "", max_repairs: int = 2):
     later notebook must beat by evolving the harness, never the weights.
     """
 
+    @observe(name="sql_agent")
     def agent_fn(question: str) -> str:
+        # @observe groups the initial call + any repair calls into ONE Langfuse
+        # trace per question -- that trace IS the agent's trajectory.
         sql = extract_sql(llm(baseline_prompt(question, extra=extra), model=model))
         for _ in range(max_repairs):
             _, err = run_sql(sql)

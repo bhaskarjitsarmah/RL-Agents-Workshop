@@ -12,7 +12,9 @@ Public API:
     evaluate(agent_fn, ...)    -> dict          (run an agent over the eval set)
 """
 
-from .llm import llm, METER, CostMeter
+from .llm import (
+    llm, METER, CostMeter, preflight, flush, observe, get_client,
+)
 from .db import build_db, load_tasks, score_sql, run_sql, DB_PATH, SCHEMA_TEXT
 from .evaluate import evaluate
 from .agents import (
@@ -23,6 +25,10 @@ __all__ = [
     "llm",
     "METER",
     "CostMeter",
+    "preflight",
+    "flush",
+    "observe",
+    "get_client",
     "build_db",
     "load_tasks",
     "score_sql",

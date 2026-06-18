@@ -42,17 +42,35 @@ and the learning signal is verbal/evolutionary feedback instead of gradients.
 Backing papers: SkillOpt, the MSFT/Fudan skill-lifecycle study, SkillX, EvoSkill,
 ASG-SI (see workshop slides).
 
+## Real-world tool stack (required)
+
+This workshop is run the way an AI engineer actually works - with a live
+observability + experiment-tracking + vector-DB stack, not toy in-memory stubs.
+**Create these four free accounts and fill your `.env` _before_ the session**
+(full walkthrough in **[SETUP.md](SETUP.md)**):
+
+| Tool | Role in the workshop | Used in |
+|---|---|---|
+| **OpenAI** | the model ("brain") | all |
+| **Langfuse** | LLM observability / tracing - every `llm()` call is traced | all |
+| **Weights & Biases** | experiment tracking - the agent's "training" curves | NB2, NB4 |
+| **Qdrant Cloud** | managed vector DB for skill / memory retrieval | NB3, NB5 |
+| **LangGraph** | agent orchestration framework (lib, no account) | later refactor |
+
+The notebooks **fail fast** (`preflight()`) if any required key is missing.
+
 ## Setup
 
 ```bash
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env        # then put your own API key in .env
+cp .env.example .env        # then fill in the keys per SETUP.md
+python -c "from workshop_utils import preflight; preflight()"   # verify
 ```
 
-Participants **bring their own key**. Any OpenAI-compatible endpoint works - set
-`OPENAI_BASE_URL` in `.env` to point at Azure, a local vLLM/Ollama server, or a
-corporate proxy. Default model is `gpt-4o-mini` (cheap + fast); change
-`WORKSHOP_MODEL` to swap.
+Any OpenAI-compatible endpoint works - set `OPENAI_BASE_URL` in `.env` to point at
+Azure, a local vLLM/Ollama server, or a corporate proxy. Default model is
+`gpt-4o-mini` (cheap + fast); change `WORKSHOP_MODEL` to swap.
 
 Then open the notebooks:
 
@@ -86,7 +104,7 @@ to control spend.
 ```
 RL-Agents-Workshop/
   workshop_utils/        shared, reusable plumbing
-    llm.py               backend-agnostic llm() wrapper + cost meter
+    llm.py               llm() wrapper + cost meter + Langfuse tracing + preflight()
     db.py                toy DB builder + execution-match scorer (the reward V)
     tasks.py             40 NL -> gold SQL tasks (train/test)
     evaluate.py          the eval harness (component V)
@@ -101,6 +119,7 @@ RL-Agents-Workshop/
   build_notebooks.py     regenerates the notebooks from plain-text cell defs
   requirements.txt
   .env.example
+  SETUP.md               pre-work: accounts + keys to set up before the workshop
 ```
 
 To regenerate notebooks after editing `build_notebooks.py`:
