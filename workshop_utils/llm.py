@@ -171,6 +171,20 @@ def llm(
     return resp.choices[0].message.content or ""
 
 
+def embed(texts, model: str = "text-embedding-3-small"):
+    """Return embedding vector(s) for a string or list of strings.
+
+    Pass a single string -> get one vector back; pass a list -> get a list of
+    vectors. Uses the same (Langfuse-traced) OpenAI client as `llm()`.
+    `text-embedding-3-small` has 1536 dimensions.
+    """
+    single = isinstance(texts, str)
+    inputs = [texts] if single else list(texts)
+    resp = _get_client().embeddings.create(model=model, input=inputs)
+    vectors = [d.embedding for d in resp.data]
+    return vectors[0] if single else vectors
+
+
 def flush() -> None:
     """Flush buffered Langfuse events. Call at the end of a notebook so traces
     are sent before the kernel goes idle."""

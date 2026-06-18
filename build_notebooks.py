@@ -606,7 +606,7 @@ from workshop_utils import (
     llm, METER, SCHEMA_TEXT, extract_sql, baseline_prompt, make_agent,
     preflight, flush,
 )
-preflight()               # hard-require OPENAI + LANGFUSE keys (see SETUP.md)
+preflight("QDRANT_URL", "QDRANT_API_KEY")  # + OPENAI + LANGFUSE (see SETUP.md)
 build_db()
 agent = make_agent()      # the NB0 agent (no skills yet)
 
@@ -708,13 +708,24 @@ for s in candidate_skills:
 print("\n", METER)
 """),
     md(r"""
-## 4. Consume - retrieve only the relevant skills
+## 4. Consume - retrieve relevant skills from a vector DB (Qdrant)
 
 Dumping the whole library into every prompt wastes tokens and invites
-interference. Instead we **retrieve** the top-k skills whose trigger overlaps the
-question (a simple lexical match here; NB5 upgrades to a hierarchical library).
+interference. A real agent stores skills in a **vector database** and retrieves
+only the few relevant to each question. We use **Qdrant Cloud** + OpenAI
+embeddings - the exact retrieval (RAG) pattern you'd run in production.
 """),
     code(r"""
+import os
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
+from workshop_utils import embed          # OpenAI embeddings, traced by Langfuse
+
+COLLECTION = "workshop_skills"
+EMBED_DIM = 1536                           # text-embedding-3-small
+
+qdrant = QdrantClient(url=os.environ["QDRANT_URL"], api_key=os.environ["QDRANT_API_KEY"])
+
 def format_skills(skills):
     if not skills:
         return ""
@@ -723,26 +734,34 @@ def format_skills(skills):
         lines.append(f"- {s['name']}: USE WHEN {s['when_to_use']}. PATTERN: {s['pattern']}")
     return "\n".join(lines)
 
-_WORD = re.compile(r"[a-z]+")
-def _tokens(text):
-    return set(_WORD.findall(text.lower()))
+def skill_text(s):                         # what we embed: the trigger + pattern
+    return f"{s['name']}. USE WHEN {s['when_to_use']}. {s['pattern']}"
 
-def retrieve(question, skills, k=3):
-    q = _tokens(question)
-    scored = [(len(q & _tokens(s["name"] + " " + s["when_to_use"])), s) for s in skills]
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [s for ov, s in scored[:k] if ov > 0]
+def index_skills(skills, collection=COLLECTION):
+    if qdrant.collection_exists(collection):
+        qdrant.delete_collection(collection)
+    qdrant.create_collection(
+        collection, vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE))
+    vectors = embed([skill_text(s) for s in skills])
+    qdrant.upsert(collection, points=[
+        PointStruct(id=i, vector=v, payload=s)
+        for i, (v, s) in enumerate(zip(vectors, skills))])
+    return qdrant.count(collection).count
 
-def make_skill_agent(skills, k=3):
-    # Same NB0 harness; per question we inject only the retrieved skills (C <- S).
+def retrieve(question, k=3, collection=COLLECTION):
+    hits = qdrant.query_points(collection, query=embed(question), limit=k).points
+    return [h.payload for h in hits]
+
+def make_skill_agent(k=3):
+    # Same NB0 harness; per question we retrieve from Qdrant and inject (C <- S).
     def agent_fn(question):
-        return make_agent(extra=format_skills(retrieve(question, skills, k)))(question)
+        return make_agent(extra=format_skills(retrieve(question, k)))(question)
     return agent_fn
 
-# Sanity check: what does retrieval pick for a revenue question?
+print("indexed", index_skills(candidate_skills), "skills into Qdrant ->", COLLECTION)
 demo_q = "Which product generated the most completed revenue?"
 print("retrieved for:", demo_q)
-for s in retrieve(demo_q, candidate_skills, k=3):
+for s in retrieve(demo_q, k=3):
     print("  -", s["name"])
 """),
     md(r"""
@@ -819,11 +838,13 @@ print(METER)
     md(r"""
 ## 7. The payoff - structure + gate + retrieval
 
-Now run the **curated** library with **retrieval** and compare the three regimes.
+Re-index **only the curated** skills into Qdrant, then run with **retrieval** and
+compare the three regimes.
 """),
     code(r"""
+index_skills(curated)     # the vector DB now holds only the gated skills
 METER.reset()
-acc_curated = evaluate(make_skill_agent(curated, k=3), split="test")["accuracy"]
+acc_curated = evaluate(make_skill_agent(k=3), split="test")["accuracy"]
 print("baseline (no skills)      :", round(baseline_acc, 3))
 print("ALL skills dumped         :", round(acc_dump, 3))
 print("curated + retrieved (NB3) :", round(acc_curated, 3))
@@ -852,7 +873,8 @@ flush()                   # ship traces to Langfuse
   successes**, not only failures.
 - **More skills is not better.** An unvetted pool degrades; a small **rubric gate**
   (generality / correctness / actionability) keeps the library clean.
-- Retrieval means each prompt sees only the few skills it needs.
+- Retrieval from a real **vector DB (Qdrant)** means each prompt sees only the few
+  skills it needs - the same RAG pattern you'd ship in production.
 
 ### The gap this leaves (-> NB4)
 We curated with a *one-shot* rubric and a hand-set threshold. We never **optimized**
@@ -863,8 +885,10 @@ way you'd train a neural net - so improvement is systematic, not lucky.
 ### Exercise
 1. Lower the gate to "average >= 1" instead of "min >= 1". Do more skills slip
    through, and does test accuracy fall? You just felt the 25%-degrade trap.
-2. Replace lexical `retrieve` with embeddings (e.g. cosine over `text-embedding-3-small`).
-   Does retrieval quality improve on the harder questions?
+2. Sweep `k` in `make_skill_agent(k=...)` from 1 to 6. More retrieved skills isn't
+   always better - find the sweet spot, and watch the cost meter climb with `k`.
+3. Open the Qdrant dashboard and inspect the `workshop_skills` collection. Add a
+   payload field (e.g. the skill's difficulty) and filter retrieval on it.
 """),
 ]
 

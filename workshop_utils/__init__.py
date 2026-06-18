@@ -13,7 +13,7 @@ Public API:
 """
 
 from .llm import (
-    llm, METER, CostMeter, preflight, flush, observe, get_client,
+    llm, embed, METER, CostMeter, preflight, flush, observe, get_client,
 )
 from .db import build_db, load_tasks, score_sql, run_sql, DB_PATH, SCHEMA_TEXT
 from .evaluate import evaluate
@@ -23,6 +23,7 @@ from .agents import (
 
 __all__ = [
     "llm",
+    "embed",
     "METER",
     "CostMeter",
     "preflight",
