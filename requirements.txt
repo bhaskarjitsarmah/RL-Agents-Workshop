@@ -10,3 +10,7 @@ langfuse>=4.0          # LLM observability / tracing (v4 SDK; instruments every 
 wandb>=0.18            # experiment tracking (NB2 learning curve, NB4 SkillOpt "training")
 qdrant-client>=1.12    # managed vector DB for skill / memory retrieval (NB3, NB5)
 langgraph>=1.0         # agent orchestration framework (later refactor notebook)
+
+# Notebook runtime -- needed to actually run the .ipynb files.
+ipykernel>=6.29        # the Python kernel VS Code / Jupyter starts to run cells
+jupyterlab>=4.0        # optional: only if you run the notebooks via `jupyter lab`

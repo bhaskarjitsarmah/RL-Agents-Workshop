@@ -72,11 +72,29 @@ Any OpenAI-compatible endpoint works - set `OPENAI_BASE_URL` in `.env` to point 
 Azure, a local vLLM/Ollama server, or a corporate proxy. Default model is
 `gpt-4o-mini` (cheap + fast); change `WORKSHOP_MODEL` to swap.
 
-Then open the notebooks:
+## Running the notebooks
+
+The notebooks live in `notebooks/` and are meant to be run **top-to-bottom, in
+order** (NB0 -> NB1 -> ...). Each one's first cell calls `preflight()` and will
+stop immediately with a clear message if a required key is missing. Pick either
+front-end:
+
+**VS Code**
+
+1. Open the repo, then open `notebooks/NB0_build_your_first_agent.ipynb`.
+2. Click **Select Kernel** (top-right) -> **Python Environments** -> choose the
+   interpreter at **`.venv`** (`.venv\Scripts\python.exe` on Windows). If `.venv`
+   isn't listed, reload the window (Ctrl/Cmd+Shift+P -> "Developer: Reload Window").
+3. **Run All**, or run cells one at a time with Shift+Enter.
+
+**Jupyter Lab**
 
 ```bash
-jupyter lab notebooks/
+jupyter lab notebooks/      # uses the .venv you activated above
 ```
+
+Either way, the setup cell should print `preflight OK ->...` and
+`Database ready at: ...`. Once that passes, the rest of the notebook just works.
 
 ## The task: text-to-SQL
 

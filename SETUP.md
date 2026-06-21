@@ -66,3 +66,17 @@ python -c "from workshop_utils import preflight; preflight()"
 
 You should see `preflight OK`. If a key is missing it will tell you exactly which
 one. See you at the workshop!
+
+## Run your first notebook
+
+`pip install -r requirements.txt` already installed `ipykernel` (the kernel that
+runs the cells) and `jupyterlab`, so you're ready to open `notebooks/NB0_build_your_first_agent.ipynb`:
+
+- **VS Code:** open the file, click **Select Kernel** (top-right) -> **Python
+  Environments** -> pick the one at **`.venv`** (`.venv\Scripts\python.exe` on
+  Windows). If it's not listed, reload the window (Ctrl/Cmd+Shift+P ->
+  "Developer: Reload Window"). Then **Run All**.
+- **Jupyter Lab:** with the venv active, run `jupyter lab notebooks/`.
+
+Run the cells top-to-bottom. The first cell should print `preflight OK ->...` and
+`Database ready at: ...` -- once that passes, the rest of the notebook just works.
