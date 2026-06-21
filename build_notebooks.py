@@ -78,7 +78,30 @@ print("Database ready at:", DB)
 > **Langfuse** - open your project at the `LANGFUSE_BASE_URL` you configured and
 > you'll see each call appear live. That dashboard is how a real team inspects an
 > agent's behaviour, cost, and latency; we'll lean on it throughout.
+"""),
+    md(r"""
+## Meet the database first
 
+Before we ask the model for any SQL, let's *look* at the database it will be
+querying - so the table and column names mean something to you, and you can spot
+when the model gets them wrong. It's a small toy **"shop"**: customers place
+orders, each order has line items, and each line item points at a product.
+"""),
+    code(r"""
+# A quick tour of the four tables: the schema, then row counts + a few sample rows.
+print(SCHEMA_TEXT)
+
+def peek(table, n=4):
+    rows, _ = run_sql(f"SELECT * FROM {table} LIMIT {n}")
+    total, _ = run_sql(f"SELECT COUNT(*) FROM {table}")
+    print(f"\n{table}  -  {total[0][0]} rows total (showing {len(rows)}):")
+    for r in rows:
+        print("   ", r)
+
+for t in ("customers", "products", "orders", "order_items"):
+    peek(t)
+"""),
+    md(r"""
 ## Move 1 - The brain, alone
 
 The simplest thing we can do is ask the LLM for SQL with **no schema and no
