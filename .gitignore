@@ -26,6 +26,10 @@ ENV/
 .ipynb_checkpoints/
 */.ipynb_checkpoints/
 
+# --- Experiment-tracking artifacts (rebuilt by the notebooks) ---
+wandb/
+*/wandb/
+
 # --- OS / editor cruft ---
 .DS_Store
 Thumbs.db
