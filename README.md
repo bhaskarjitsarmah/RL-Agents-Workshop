@@ -8,6 +8,28 @@ its prompt, memory, examples, tools, and - the headline - its **skill library**.
 > vector, and your eval set is the loss.* You can "train" an agent in text space,
 > on a laptop, with no GPU.
 
+## At a glance
+
+A frozen brain wrapped in a harness that **learns from its own results** - the
+weights never move, the loop does the learning. ([full diagrams](ARCHITECTURE.md))
+
+```mermaid
+flowchart LR
+    Q["NL question"] --> C["C · context<br/>schema + skills"]
+    C --> B["BRAIN<br/>frozen LLM<br/>(no fine-tuning)"]
+    B --> E["E · loop<br/>generate -> run -> retry"]
+    E <--> T["T · run_sql"]
+    E --> V["V · reward<br/>score_sql"]
+    V --> S["S · skill library"]
+    S -->|"retrieve"| C
+    V -. "reflect = gradient" .-> S
+    L["L · validation gate"] -. "guards" .-> S
+
+    style B fill:#eee,stroke:#888
+    style S fill:#f3f9f3,stroke:#5a5
+    style L fill:#fff3cd,stroke:#d4a017
+```
+
 ## The framing
 
 > 📐 **See [ARCHITECTURE.md](ARCHITECTURE.md)** for the full picture - diagrams

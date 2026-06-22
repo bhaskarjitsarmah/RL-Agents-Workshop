@@ -11,6 +11,9 @@
 This document is the map. It connects all seven notebooks (NB0 -> NB6) into one
 picture and shows how each one builds or evolves a piece of the agent.
 
+> 🖼️ **Slide-ready exports** (SVG + PNG) of every diagram below live in
+> [`docs/diagrams/`](docs/diagrams/).
+
 ---
 
 ## 1. The anatomy of the agent: `H = (E, T, C, S, L, V)`
