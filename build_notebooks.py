@@ -1,8 +1,9 @@
-"""Generate NB0, NB1 and NB2 as .ipynb files from plain-text cell definitions.
+"""Generate NB0-NB6 as .ipynb files from plain-text cell definitions.
 
 Run:  python build_notebooks.py
 This keeps notebook content diffable and reproducible -- we never hand-edit JSON.
-Regenerating CLEARS outputs; re-run the notebooks with an API key to repopulate.
+Regenerating CLEARS outputs of ALL notebooks; re-run them with an API key to
+repopulate. To rebuild just one, import this module and call build() for it.
 """
 
 import os
@@ -916,9 +917,753 @@ way you'd train a neural net - so improvement is systematic, not lucky.
 ]
 
 
+# ============================================================================
+# NB4 -- SkillOpt: train the skill document like a neural net
+# ============================================================================
+
+NB4 = [
+    md(r"""
+# NB4 - SkillOpt: Train the Skill Document Like a Neural Net
+
+**Workshop: Self-Evolving Agents by Optimizing the Harness (no GPU)**
+
+NB3 built a skill *library*, but it never **optimized** it: we curated with a
+one-shot rubric and a hand-set threshold, then hoped. NB4 turns that into a proper
+**training loop**. The mental model of the whole workshop, made literal:
+
+> **Reflection is the gradient, the skill document is the parameter vector, and
+> your eval set is the loss.**
+
+So we run **gradient descent in text space**:
+
+| Neural net | SkillOpt (this notebook) |
+|---|---|
+| parameter vector theta | the **skill document** we inject (C <- S) |
+| loss | **error on a held-out validation split** |
+| gradient | a **reflection** that proposes a skill *edit* from a failure |
+| learning rate | how many edits we try per step |
+| **validation gate** | accept an edit only if it does **not** hurt val |
+| momentum | the document **persists and compounds** across steps |
+
+The **validation gate** is the star: it is exactly what stops the 25%-degrade
+trap from NB3. We log the run to **Weights & Biases**, like a real fine-tune -
+except the only thing changing is text, and there is no GPU in sight.
+"""),
+    code(r"""
+import sys, os, json, re
+sys.path.insert(0, os.path.abspath(".."))
+from workshop_utils import (
+    build_db, load_tasks, run_sql, score_sql, evaluate,
+    llm, METER, SCHEMA_TEXT, extract_sql, baseline_prompt, make_agent,
+    preflight, flush,
+)
+preflight("WANDB_API_KEY")    # OPENAI + LANGFUSE + W&B (see SETUP.md)
+build_db()
+
+# Data discipline: TEST stays held out for the final number. We split the 24
+# TRAIN tasks into an optimization set (where we look for failures to learn from)
+# and a small VALIDATION set (the gate that decides which edits we keep).
+train = [t for t in load_tasks() if t["split"] == "train"]
+val   = train[::4]                          # every 4th train task -> the gate
+opt   = [t for t in train if t not in val]
+print(f"opt set: {len(opt)} tasks   val set: {len(val)} tasks   (test held out)")
+
+try:
+    baseline_acc = json.load(open("../data/baseline_test.json"))["accuracy"]
+except FileNotFoundError:
+    baseline_acc = evaluate(make_agent(), split="test")["accuracy"]
+print("NB1 baseline test accuracy:", round(baseline_acc, 3))
+"""),
+    md(r"""
+## The parameter and the gradient
+
+`theta` (our parameter) is just a **list of skills**, injected through the same
+`extra=` slot NB2/NB3 used - the frozen agent never changes. We need three pieces:
+a way to **measure** a skill document (forward pass + loss), and a way to turn a
+failure into a **proposed edit** (the gradient).
+"""),
+    code(r"""
+def format_skills(skills):
+    if not skills:
+        return ""
+    lines = ["Relevant skills (reusable SQL patterns learned from past tasks):"]
+    for s in skills:
+        lines.append(f"- {s['name']}: USE WHEN {s['when_to_use']}. PATTERN: {s['pattern']}")
+    return "\n".join(lines)
+
+def evaluate_theta(theta, tasks):
+    # One forward pass: return (accuracy, failures) for skill document `theta`.
+    agent = make_agent(extra=format_skills(theta))
+    fails, correct = [], 0
+    for t in tasks:
+        sql = agent(t["question"])
+        if score_sql(sql, t["gold"]):
+            correct += 1
+        else:
+            fails.append({"question": t["question"], "sql": sql, "gold": t["gold"]})
+    return correct / len(tasks), fails
+
+def val_accuracy(theta):
+    return evaluate_theta(theta, val)[0]      # the validation "loss" (as accuracy)
+
+PROPOSE_SYS = (
+    "You improve a text-to-SQL agent by writing ONE reusable SKILL that would have "
+    "prevented a specific failure. Return STRICT JSON with keys name, when_to_use, "
+    "pattern. 'when_to_use' triggers a CLASS of questions (no specific values); "
+    "'pattern' is the general SQL technique. Generalize - never mention the question."
+)
+
+def parse_json_obj(raw):
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    try:
+        return json.loads(m.group(0)) if m else None
+    except Exception:
+        return None
+
+def propose_skill(failure):                    # the "gradient": failure -> edit
+    raw = llm([
+        {"role": "system", "content": PROPOSE_SYS},
+        {"role": "user", "content":
+            "Schema:\n" + SCHEMA_TEXT +
+            "\nQuestion: " + failure["question"] +
+            "\n\nAgent's wrong SQL:\n" + failure["sql"] +
+            "\n\nCorrect SQL:\n" + failure["gold"] +
+            "\n\nWrite ONE general skill (JSON) that fixes this class of mistake."},
+    ])
+    d = parse_json_obj(raw)
+    if not d or not all(k in d for k in ("name", "when_to_use", "pattern")):
+        return None
+    return {k: str(d[k]) for k in ("name", "when_to_use", "pattern")}
+"""),
+    md(r"""
+## The optimizer: learning rate + validation gate + momentum
+
+Each step is one round of "SGD":
+1. **Forward pass** - run the current `theta` on the opt set; collect failures.
+2. **Gradient** - turn up to `LR` failures into candidate skill edits.
+3. **Validation gate** - apply each candidate and keep it **only if val accuracy
+   does not drop**. A candidate that would pollute the prompt is rejected here,
+   before it can ever hurt the held-out test number.
+4. **Momentum** - accepted skills stay in `theta` and compound into the next step.
+
+We also stash *every* proposal (kept or not) so we can run the no-gate ablation.
+"""),
+    code(r"""
+import wandb
+
+N_STEPS = 4          # optimization steps ("epochs")
+LR      = 2          # candidate skill edits proposed per step (the learning rate)
+
+run = wandb.init(project="rl-agents-workshop", name="nb4-skillopt",
+                 config={"model": "gpt-4o-mini", "n_steps": N_STEPS, "lr": LR,
+                         "n_opt": len(opt), "n_val": len(val)})
+wandb.define_metric("step")
+wandb.define_metric("train_acc", step_metric="step")
+wandb.define_metric("val_acc", step_metric="step")
+
+theta = []                    # the skill document (parameter) - starts empty
+all_candidates = []           # every proposal, for the no-gate ablation later
+curve = []
+METER.reset()
+for step in range(N_STEPS):
+    train_acc, fails = evaluate_theta(theta, opt)        # forward pass
+    vacc = val_accuracy(theta)
+    curve.append((step, train_acc, vacc, len(theta)))
+    wandb.log({"step": step, "train_acc": train_acc, "val_acc": vacc,
+               "n_skills": len(theta)})
+    print(f"step {step}: train={train_acc:.2f}  val={vacc:.2f}  skills={len(theta)}")
+    if not fails:
+        print("  no failures left on the opt set -> converged"); break
+    for f in fails[:LR]:                                  # gradient: LR edits
+        cand = propose_skill(f)
+        if not cand:
+            continue
+        all_candidates.append(cand)
+        trial_val = val_accuracy(theta + [cand])          # the validation gate
+        if trial_val >= vacc:
+            theta.append(cand); vacc = trial_val
+            print(f"  KEEP   {cand['name']:<26} val -> {trial_val:.2f}")
+        else:
+            print(f"  REJECT {cand['name']:<26} val {trial_val:.2f} < {vacc:.2f} (would pollute)")
+
+print(f"\nfinal skill document: {len(theta)} skills (from {len(all_candidates)} proposed)")
+print(METER)
+"""),
+    code(r"""
+import matplotlib.pyplot as plt
+xs = [c[0] for c in curve]
+plt.figure(figsize=(6, 4))
+plt.plot(xs, [c[1] for c in curve], marker="o", label="train acc (opt set)")
+plt.plot(xs, [c[2] for c in curve], marker="s", label="val acc (the gate)")
+plt.axhline(baseline_acc, ls="--", color="gray", label="NB0 baseline (test)")
+plt.xlabel("optimization step"); plt.ylabel("accuracy"); plt.ylim(0, 1)
+plt.title("SkillOpt: training the skill document (weights frozen)")
+plt.legend(); plt.show()
+"""),
+    md(r"""
+## Ablation - turn the gate off and watch it pollute
+
+The gate is the only thing separating "learning" from "accumulating junk". Drop
+it - accept **every** proposed edit, the unvetted pool from NB3 - and compare the
+held-out **test** number against the gated document.
+"""),
+    code(r"""
+theta_ungated = all_candidates                # keep everything we ever proposed
+
+METER.reset()
+test_gated   = evaluate(make_agent(extra=format_skills(theta)),         split="test")["accuracy"]
+test_ungated = evaluate(make_agent(extra=format_skills(theta_ungated)), split="test")["accuracy"]
+print("baseline (no skills)        :", round(baseline_acc, 3))
+print("SkillOpt + gate  (NB4)      :", round(test_gated, 3),   f"  [{len(theta)} skills]")
+print("accept-everything (no gate) :", round(test_ungated, 3), f"  [{len(theta_ungated)} skills]")
+print(METER)
+
+wandb.summary["baseline_acc"]   = baseline_acc
+wandb.summary["test_gated"]     = test_gated
+wandb.summary["test_ungated"]   = test_ungated
+wandb.summary["n_skills_final"] = len(theta)
+wandb.finish()
+"""),
+    code(r"""
+import matplotlib.pyplot as plt
+labels = ["baseline\n(NB0)", "SkillOpt\n+ gate", "no gate\n(accept all)"]
+vals = [baseline_acc, test_gated, test_ungated]
+plt.figure(figsize=(6, 4))
+bars = plt.bar(labels, vals, color=["gray", "seagreen", "indianred"])
+plt.ylim(0, 1); plt.ylabel("test accuracy")
+plt.title("The validation gate is what makes optimization safe")
+for b, v in zip(bars, vals):
+    plt.text(b.get_x() + b.get_width() / 2, v + 0.02, f"{v:.2f}", ha="center")
+plt.show()
+flush()
+"""),
+    md(r"""
+## Takeaways
+
+- **Optimizing a prompt is training.** We ran SGD with a parameter (the skill
+  document), a loss (validation error), a gradient (reflection), a learning rate,
+  and momentum - no weights, no GPU.
+- The **validation gate** is the load-bearing idea: it turns "self-improvement"
+  from a hope into a guarantee that each accepted edit was *measured* not to hurt.
+- Tracked in **W&B** like any training run, so the curve, the baseline, and the
+  gated-vs-ungated result are all on one shareable run.
+
+### The gap this leaves (-> NB5)
+Our document is **flat** - one list, every skill equal, retrieved the same way.
+Real libraries are **hierarchical** (broad strategies -> specific patterns), and
+the best skills are often written by a **strong** model and *transferred* to a
+weaker, cheaper one. That is NB5.
+
+### Exercise
+1. Shrink `val` to 2 tasks. Does the gate get noisier (more bad keeps)? You just
+   felt validation-set variance - the same bias/variance trade-off as in real ML.
+2. Raise `LR` to 4. More edits per step costs more API calls (watch the meter) -
+   does test accuracy actually improve, or do you just overfit the opt set?
+3. Make the gate strict (`trial_val > vacc`). Fewer skills survive - compare the
+   final test number and the skill count.
+"""),
+]
+
+
+# ============================================================================
+# NB5 -- Hierarchical skill library + strong->weak transfer
+# ============================================================================
+
+NB5 = [
+    md(r"""
+# NB5 - Hierarchical Skills and Strong -> Weak Transfer
+
+**Workshop: Self-Evolving Agents by Optimizing the Harness (no GPU)**
+
+NB4 trained a **flat** skill document: one list, every skill equal, all retrieved
+the same way. Two ideas from the skill-optimization literature (SkillX, the
+hierarchical-library work) make this scale:
+
+1. **Hierarchy.** Organize skills as **strategies -> tactics**. Retrieve the right
+   *strategy* for a question first, then pull only its *tactics*. This is
+   coarse-to-fine RAG: fewer, more relevant tokens per prompt.
+2. **Strong -> weak transfer.** The *author* of a skill matters. A **strong**
+   model (gpt-4o) writes sharper, more general skills than a **weak** one
+   (gpt-4o-mini). Inject the strong model's skills into the **weak** agent and the
+   weak agent gets better - capability **transferred as text**, no fine-tuning.
+   This is how a cheap production model can punch above its weight.
+
+> **Cost note:** this notebook calls **gpt-4o** as the teacher, so it costs a bit
+> more than the others (still cents). The *consumer* stays gpt-4o-mini.
+"""),
+    code(r"""
+import sys, os, json, re
+sys.path.insert(0, os.path.abspath(".."))
+from workshop_utils import (
+    build_db, load_tasks, run_sql, score_sql, evaluate,
+    llm, embed, METER, SCHEMA_TEXT, extract_sql, baseline_prompt, make_agent,
+    preflight, flush,
+)
+preflight("QDRANT_URL", "QDRANT_API_KEY")    # + OPENAI + LANGFUSE (see SETUP.md)
+build_db()
+
+STRONG_MODEL = "gpt-4o"                                   # the teacher (authors skills)
+WEAK_MODEL   = os.environ.get("WORKSHOP_MODEL", "gpt-4o-mini")  # the consumer
+
+try:
+    baseline_acc = json.load(open("../data/baseline_test.json"))["accuracy"]
+except FileNotFoundError:
+    baseline_acc = evaluate(make_agent(model=WEAK_MODEL), split="test")["accuracy"]
+print("weak baseline (no skills) test accuracy:", round(baseline_acc, 3))
+"""),
+    md(r"""
+## 1. Author skills with a strong vs a weak teacher
+
+We have **gold SQL** for the train tasks, so a teacher can write a skill straight
+from each `(question, gold)` pair - no need to run an agent first. We ask each
+teacher for a skill plus the **family** (strategy) it belongs to, which gives us
+the hierarchy for free. We author from **medium/hard** train tasks (the easy ones
+aren't worth a skill).
+"""),
+    code(r"""
+AUTHOR_SYS = (
+    "You write ONE reusable SKILL for a text-to-SQL agent from a solved example. "
+    "Return STRICT JSON with keys: family, name, when_to_use, pattern. "
+    "'family' is a short strategy category shared by similar skills "
+    "(e.g. completed_revenue, set_difference, grouped_aggregation, date_bucketing). "
+    "'when_to_use' triggers a CLASS of questions (no specific values); "
+    "'pattern' is the general SQL technique. Generalize - never mention the question."
+)
+
+def parse_json_obj(raw):
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    try:
+        return json.loads(m.group(0)) if m else None
+    except Exception:
+        return None
+
+def author_skill(task, model):
+    raw = llm([
+        {"role": "system", "content": AUTHOR_SYS},
+        {"role": "user", "content":
+            "Schema:\n" + SCHEMA_TEXT +
+            "\nSolved question: " + task["question"] +
+            "\nCorrect SQL:\n" + task["gold"] +
+            "\n\nReturn the skill as JSON."},
+    ], model=model)
+    d = parse_json_obj(raw)
+    keys = ("family", "name", "when_to_use", "pattern")
+    if not d or not all(k in d for k in keys):
+        return None
+    return {k: str(d[k]) for k in keys}
+
+rich = [t for t in load_tasks()
+        if t["split"] == "train" and t["level"] in ("medium", "hard")][:12]
+
+METER.reset()
+strong_skills = [s for s in (author_skill(t, STRONG_MODEL) for t in rich) if s]
+weak_skills   = [s for s in (author_skill(t, WEAK_MODEL)   for t in rich) if s]
+print(f"strong ({STRONG_MODEL}) authored {len(strong_skills)} skills")
+print(f"weak   ({WEAK_MODEL}) authored {len(weak_skills)} skills")
+print(METER)
+"""),
+    md(r"""
+## 2. See the hierarchy the strong teacher produced
+
+Grouping the strong model's skills by `family` gives a **strategies -> tactics**
+tree. This structure is what we'll retrieve over: pick a strategy, then its tactics.
+"""),
+    code(r"""
+from collections import defaultdict
+def as_tree(skills):
+    fams = defaultdict(list)
+    for s in skills:
+        fams[s["family"]].append(s)
+    return fams
+
+for fam, members in as_tree(strong_skills).items():
+    print(f"STRATEGY  {fam}")
+    for m in members:
+        print(f"    - {m['name']}: USE WHEN {m['when_to_use'][:70]}")
+"""),
+    md(r"""
+## 3. Index the hierarchy in Qdrant and retrieve coarse-to-fine
+
+We store two kinds of points in one collection: **strategy** points (one per
+family) and **tactic** points (one per skill), tagged with `level` and `family`.
+Retrieval is two-stage, using Qdrant payload **filters**:
+1. find the nearest **strategy** to the question, then
+2. find the top tactics **within that family**.
+"""),
+    code(r"""
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue,
+)
+
+COLLECTION = "workshop_skills_hier"
+EMBED_DIM = 1536                                   # text-embedding-3-small
+
+qdrant = QdrantClient(url=os.environ["QDRANT_URL"], api_key=os.environ["QDRANT_API_KEY"])
+
+def index_hier(skills, collection=COLLECTION):
+    if qdrant.collection_exists(collection):
+        qdrant.delete_collection(collection)
+    qdrant.create_collection(
+        collection, vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE))
+    points, pid = [], 0
+    for fam, members in as_tree(skills).items():
+        desc = "covers: " + ", ".join(m["name"] for m in members)
+        points.append(PointStruct(id=pid, vector=embed(f"{fam}. {desc}"),
+            payload={"level": "strategy", "family": fam, "description": desc}))
+        pid += 1
+        vecs = embed([f"{m['name']}. USE WHEN {m['when_to_use']}. {m['pattern']}"
+                      for m in members])
+        for m, v in zip(members, vecs):
+            points.append(PointStruct(id=pid, vector=v,
+                payload={"level": "tactic", **m})); pid += 1
+    qdrant.upsert(collection, points=points)
+    return qdrant.count(collection).count
+
+def _only(level, family=None):
+    must = [FieldCondition(key="level", match=MatchValue(value=level))]
+    if family is not None:
+        must.append(FieldCondition(key="family", match=MatchValue(value=family)))
+    return Filter(must=must)
+
+def retrieve_hier(question, k=3, collection=COLLECTION):
+    qv = embed(question)
+    strat = qdrant.query_points(collection, query=qv, limit=1,
+                                query_filter=_only("strategy")).points
+    if not strat:
+        return []
+    fam = strat[0].payload["family"]
+    tactics = qdrant.query_points(collection, query=qv, limit=k,
+                                  query_filter=_only("tactic", fam)).points
+    return strat + tactics
+
+def format_hier(points):
+    if not points:
+        return ""
+    lines = ["Relevant skill hierarchy (apply the strategy, then its tactics):"]
+    for p in points:
+        d = p.payload
+        if d["level"] == "strategy":
+            lines.append(f"STRATEGY {d['family']} - {d['description']}")
+        else:
+            lines.append(f"  - {d['name']}: USE WHEN {d['when_to_use']}. PATTERN: {d['pattern']}")
+    return "\n".join(lines)
+
+print("indexed", index_hier(strong_skills), "points (strategies + tactics)")
+demo_q = "Which customer has the highest total completed revenue?"
+print("\nretrieved for:", demo_q)
+print(format_hier(retrieve_hier(demo_q, k=2)))
+"""),
+    md(r"""
+## 4. The transfer experiment
+
+Same **weak** consumer agent (gpt-4o-mini), same hierarchical retrieval - we only
+change **who authored the skills**. If strong -> weak transfer is real, the weak
+agent should improve *more* with the strong teacher's skills than with its own.
+"""),
+    code(r"""
+def make_consumer(k=3):
+    # The weak agent, augmented per-question with retrieved hierarchical skills.
+    def agent_fn(question):
+        return make_agent(model=WEAK_MODEL,
+                          extra=format_hier(retrieve_hier(question, k)))(question)
+    return agent_fn
+
+METER.reset()
+index_hier(strong_skills)
+acc_strong = evaluate(make_consumer(k=3), split="test")["accuracy"]
+index_hier(weak_skills)
+acc_weak = evaluate(make_consumer(k=3), split="test")["accuracy"]
+print("weak baseline (no skills)        :", round(baseline_acc, 3))
+print("weak + WEAK-authored skills      :", round(acc_weak, 3))
+print("weak + STRONG-authored skills    :", round(acc_strong, 3), " <- transfer")
+print(METER)
+"""),
+    code(r"""
+import matplotlib.pyplot as plt
+labels = ["weak\nbaseline", "weak +\nweak skills", "weak +\nstrong skills"]
+vals = [baseline_acc, acc_weak, acc_strong]
+plt.figure(figsize=(6, 4))
+bars = plt.bar(labels, vals, color=["gray", "steelblue", "seagreen"])
+plt.ylim(0, 1); plt.ylabel("test accuracy (weak consumer)")
+plt.title("Strong -> weak transfer: better authorship lifts the cheap model")
+for b, v in zip(bars, vals):
+    plt.text(b.get_x() + b.get_width() / 2, v + 0.02, f"{v:.2f}", ha="center")
+plt.show()
+flush()
+"""),
+    md(r"""
+## Takeaways
+
+- A **hierarchical** library (strategy -> tactic) retrieves coarse-to-fine, so
+  each prompt sees fewer, more on-target skills than a flat dump.
+- **Authorship matters.** Skills written by a strong model **transfer** to a weak
+  one and lift its accuracy - capability moved as *text*, with the frozen weak
+  model still doing inference. This is the cheap-model-punching-up pattern.
+- Qdrant payload **filters** turn one collection into a multi-level index - the
+  same trick scales to real production skill libraries.
+
+### The gap this leaves (-> NB6)
+We still ran each stage **by hand**: author, index, evaluate. NB6 closes the loop -
+an **autonomous** agent that evolves its own skill library across generations,
+**audits** every change, and reports a final number. The capstone.
+
+### Exercise
+1. Sweep `k` (tactics retrieved) from 1 to 5. Where does more context start to
+   hurt? Watch the cost meter climb with `k`.
+2. Add a third teacher tier (e.g. `gpt-4.1-mini`) and compare the transfer curve.
+3. Retrieve the **top-2 strategies** instead of 1 before pulling tactics. Does
+   broadening the coarse step help the hard, multi-concept questions?
+"""),
+]
+
+
+# ============================================================================
+# NB6 -- Capstone: self-evolving, auditable agent (EvoSkill + ASG-SI)
+# ============================================================================
+
+NB6 = [
+    md(r"""
+# NB6 - Capstone: A Self-Evolving, Auditable Agent
+
+**Workshop: Self-Evolving Agents by Optimizing the Harness (no GPU)**
+
+This is the payoff. Every component of **H = (E, T, C, S, L, V)** is now in play,
+and we let the agent **evolve itself** - no human in the per-step loop.
+
+- **EvoSkill** (evolutionary skill search): each generation breeds a small
+  **population** of skill-library variants by *mutating* the current best -
+  **adding** a skill distilled from a failure, or **dropping** a weak one - then
+  **selects** the fittest on a held-out validation split. This is the outer
+  **execution loop (E)** evolved into an optimizer.
+- **ASG-SI** (auditable skill generation + self-improvement): every proposed
+  change is scored with a **decomposed verifiable reward** (`score_sql`, our V)
+  and written to an **audit log** with provenance - which generation, which
+  operator, the measured val delta, and the accept/reject decision. Nothing enters
+  the library (state **S**) without a recorded, replayable justification.
+
+The result is a frozen LLM that gets measurably better **and** can explain exactly
+*why* it changed - self-improvement you could put in front of a reviewer.
+"""),
+    code(r"""
+import sys, os, json, re
+sys.path.insert(0, os.path.abspath(".."))
+from workshop_utils import (
+    build_db, load_tasks, run_sql, score_sql, evaluate,
+    llm, METER, SCHEMA_TEXT, extract_sql, baseline_prompt, make_agent,
+    preflight, flush,
+)
+preflight("WANDB_API_KEY")    # OPENAI + LANGFUSE + W&B (see SETUP.md)
+build_db()
+
+train = [t for t in load_tasks() if t["split"] == "train"]
+val   = train[::4]                          # held-out validation = fitness signal
+opt   = [t for t in train if t not in val]  # where we mine failures to mutate from
+
+try:
+    baseline_acc = json.load(open("../data/baseline_test.json"))["accuracy"]
+except FileNotFoundError:
+    baseline_acc = evaluate(make_agent(), split="test")["accuracy"]
+print(f"opt={len(opt)}  val={len(val)}  (test held out)")
+print("baseline test accuracy:", round(baseline_acc, 3))
+"""),
+    md(r"""
+## The pieces: measure, mutate, audit
+
+We reuse the SkillOpt machinery (forward pass + the reflection "gradient"), then
+add the two evolutionary **mutation operators** and the **audit log** that makes
+the run reviewable.
+"""),
+    code(r"""
+def format_skills(skills):
+    if not skills:
+        return ""
+    lines = ["Relevant skills (reusable SQL patterns the agent has learned):"]
+    for s in skills:
+        lines.append(f"- {s['name']}: USE WHEN {s['when_to_use']}. PATTERN: {s['pattern']}")
+    return "\n".join(lines)
+
+def evaluate_theta(theta, tasks):
+    agent = make_agent(extra=format_skills(theta))
+    fails, correct = [], 0
+    for t in tasks:
+        sql = agent(t["question"])
+        if score_sql(sql, t["gold"]):
+            correct += 1
+        else:
+            fails.append({"question": t["question"], "sql": sql, "gold": t["gold"]})
+    return correct / len(tasks), fails
+
+def val_fitness(theta):
+    return evaluate_theta(theta, val)[0]
+
+PROPOSE_SYS = (
+    "You improve a text-to-SQL agent by writing ONE reusable SKILL that would have "
+    "prevented a failure. Return STRICT JSON with keys name, when_to_use, pattern. "
+    "Generalize to a CLASS of questions; never mention the specific question."
+)
+
+def parse_json_obj(raw):
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    try:
+        return json.loads(m.group(0)) if m else None
+    except Exception:
+        return None
+
+def propose_skill(failure):                    # mutation: ADD (gradient from a failure)
+    raw = llm([
+        {"role": "system", "content": PROPOSE_SYS},
+        {"role": "user", "content":
+            "Schema:\n" + SCHEMA_TEXT + "\nQuestion: " + failure["question"] +
+            "\n\nWrong SQL:\n" + failure["sql"] + "\n\nCorrect SQL:\n" + failure["gold"] +
+            "\n\nWrite ONE general skill (JSON)."},
+    ])
+    d = parse_json_obj(raw)
+    if not d or not all(k in d for k in ("name", "when_to_use", "pattern")):
+        return None
+    return {k: str(d[k]) for k in ("name", "when_to_use", "pattern")}
+"""),
+    md(r"""
+## The outer loop: a (1 + lambda) evolutionary strategy
+
+Each **generation**:
+1. Measure the current best library (`parent`) - its val **fitness** and its
+   failures on the opt set.
+2. Breed `lambda` **offspring** by mutation: ADD a skill distilled from a failure,
+   or DROP an existing skill (to fight bloat).
+3. **Select** the fittest of {parent, offspring...} on validation (**elitism** -
+   the parent survives unless beaten), and record every trial in the audit log.
+
+The decomposed verifiable reward (`val_fitness`) is the selection pressure; the
+audit log is the receipt.
+"""),
+    code(r"""
+import wandb
+
+N_GEN      = 4       # generations
+LAMBDA_ADD = 2       # ADD-mutations bred per generation
+
+run = wandb.init(project="rl-agents-workshop", name="nb6-evoskill",
+                 config={"model": "gpt-4o-mini", "generations": N_GEN, "lambda": LAMBDA_ADD})
+wandb.define_metric("generation")
+wandb.define_metric("val_fitness", step_metric="generation")
+
+parent = []                 # the evolving skill library (state S)
+audit  = []                 # ASG-SI: every proposed change, scored and decided
+curve  = []
+METER.reset()
+
+for gen in range(N_GEN):
+    pfit, pfails = evaluate_theta(parent, opt)
+    pval = val_fitness(parent)
+    curve.append((gen, pval, len(parent)))
+    wandb.log({"generation": gen, "val_fitness": pval, "library_size": len(parent)})
+    print(f"gen {gen}: val_fitness={pval:.2f}  library={len(parent)} skills")
+
+    # --- breed offspring by mutation ------------------------------------------
+    offspring = []                                  # (operator, new_theta, note)
+    for f in pfails[:LAMBDA_ADD]:
+        c = propose_skill(f)
+        if c:
+            offspring.append(("ADD", parent + [c], c["name"]))
+    if parent:                                      # DROP-mutation: try removing one
+        offspring.append(("DROP", parent[:-1], parent[-1]["name"]))
+
+    # --- select the fittest (elitism: parent must be beaten) -------------------
+    best_fit, best_theta, best_op, best_note = pval, parent, "ELITE", "-"
+    for op, cand_theta, note in offspring:
+        f = val_fitness(cand_theta)
+        accepted = f > best_fit
+        audit.append({"gen": gen, "op": op, "skill": note,
+                      "val_fitness": round(f, 3), "decision": "accept" if accepted else "reject"})
+        print(f"    {op:<4} {note:<26} val={f:.2f}  -> {'ACCEPT' if accepted else 'reject'}")
+        if accepted:
+            best_fit, best_theta, best_op, best_note = f, cand_theta, op, note
+    parent = best_theta
+
+print(f"\nevolved library: {len(parent)} skills, val_fitness={val_fitness(parent):.2f}")
+print(METER)
+"""),
+    code(r"""
+import matplotlib.pyplot as plt
+xs = [c[0] for c in curve]
+plt.figure(figsize=(6, 4))
+plt.plot(xs, [c[1] for c in curve], marker="o", color="seagreen", label="val fitness")
+plt.axhline(baseline_acc, ls="--", color="gray", label="NB0 baseline (test)")
+plt.xlabel("generation"); plt.ylabel("validation fitness"); plt.ylim(0, 1)
+plt.title("EvoSkill: the library evolves itself (weights frozen)")
+plt.legend(); plt.show()
+"""),
+    md(r"""
+## The audit trail (ASG-SI)
+
+Self-improvement you can review: every change the agent *considered*, the
+**measured** validation reward, and the accept/reject decision. Nothing entered
+the library without this receipt.
+"""),
+    code(r"""
+print(f"{'gen':>3}  {'operator':<6} {'skill':<26} {'val':>5}  decision")
+print("-" * 60)
+for a in audit:
+    print(f"{a['gen']:>3}  {a['op']:<6} {a['skill']:<26} {a['val_fitness']:>5}  {a['decision']}")
+
+print("\nFinal library (provenance = the audit rows above that were accepted):")
+for s in parent:
+    print(f"  - {s['name']}: USE WHEN {s['when_to_use'][:64]}")
+"""),
+    md(r"""
+## The capstone number
+
+Report the evolved library on the **held-out test split** - the number we never
+optimized against - and place it next to the NB0 baseline.
+"""),
+    code(r"""
+METER.reset()
+final_test = evaluate(make_agent(extra=format_skills(parent)), split="test")
+acc = final_test["accuracy"]
+print("baseline (NB0, no skills)      :", round(baseline_acc, 3))
+print("self-evolved agent (NB6)       :", round(acc, 3))
+print("by level:", {k: round(v["acc"], 2) for k, v in final_test["by_level"].items()})
+print(METER)
+
+wandb.summary["baseline_acc"]   = baseline_acc
+wandb.summary["final_test_acc"] = acc
+wandb.summary["library_size"]   = len(parent)
+wandb.summary["audit_events"]   = len(audit)
+wandb.finish()
+flush()
+"""),
+    md(r"""
+## Takeaways - the whole thesis, realized
+
+- We built an agent (NB0), measured it (NB1, **V**), gave it memory (NB2, **S**),
+  structured that into a gated skill library (NB3), **trained** it like a net
+  (NB4), made it **hierarchical and transferable** (NB5), and finally let it
+  **evolve itself with an audit trail** (NB6) - all with the **weights frozen**.
+- **Reflection was the gradient, the skill document was the parameter vector, and
+  the eval set was the loss.** Self-evolution = optimizing the **harness**, not the
+  brain. No GPU, on a laptop, for cents.
+- **Auditable** beats merely "better": the ASG-SI log means every gain is
+  traceable to a measured reward and a recorded decision - the difference between a
+  demo and something you would actually ship.
+
+### Where to take it next
+1. Replace the `(1 + lambda)` strategy with a real **population** (crossover
+   between two libraries). Does diversity find skills a greedy search misses?
+2. Add a **regression test**: re-score accepted skills each generation and DROP any
+   whose contribution has decayed. (Skills can go stale as the library changes.)
+3. Swap the toy DB for your own schema and tasks. The harness is the product - the
+   database is just where you point it.
+"""),
+]
+
+
 if __name__ == "__main__":
     build(os.path.join(NB_DIR, "NB0_build_your_first_agent.ipynb"), NB0)
     build(os.path.join(NB_DIR, "NB1_eval_interface_and_baseline.ipynb"), NB1)
     build(os.path.join(NB_DIR, "NB2_reflexion.ipynb"), NB2)
     build(os.path.join(NB_DIR, "NB3_skill_lifecycle.ipynb"), NB3)
+    build(os.path.join(NB_DIR, "NB4_skillopt.ipynb"), NB4)
+    build(os.path.join(NB_DIR, "NB5_hierarchical_transfer.ipynb"), NB5)
+    build(os.path.join(NB_DIR, "NB6_capstone_self_evolving.ipynb"), NB6)
     print("done")
