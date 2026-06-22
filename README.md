@@ -10,6 +10,9 @@ its prompt, memory, examples, tools, and - the headline - its **skill library**.
 
 ## The framing
 
+> 📐 **See [ARCHITECTURE.md](ARCHITECTURE.md)** for the full picture - diagrams
+> connecting all seven notebooks, the self-evolution loop, and the tool stack.
+
 We use the agent-harness formalism **H = (E, T, C, S, L, V)**. In **NB0** we
 *build* the first agent - the initial execution loop (E), tool (T) and context
 (C). Every notebook after that **evolves** one part of the harness:
