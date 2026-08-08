@@ -86,12 +86,51 @@ The notebooks **fail fast** (`preflight()`) if any required key is missing.
 
 ## Setup
 
+Pick **one** of the two paths below. Option A (uv) is faster and gives everyone
+the exact same package versions; Option B (venv + pip) is the classic path if you
+don't want to install uv.
+
+### Option A - uv (recommended)
+
+**1. Install uv** (one time):
+
 ```bash
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+```powershell
+# Windows (PowerShell)
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+**2. Set up the project** (same commands on macOS / Linux / Windows):
+
+```bash
+uv sync                     # creates .venv (Python 3.12) and installs everything from uv.lock
+cp .env.example .env        # Windows: copy .env.example .env  -- then fill in the keys per SETUP.md
+uv run python -c "from workshop_utils import preflight; preflight()"   # verify
+```
+
+### Option B - venv + pip (classic)
+
+```bash
+# macOS / Linux
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env        # then fill in the keys per SETUP.md
 python -c "from workshop_utils import preflight; preflight()"   # verify
 ```
+```powershell
+# Windows (PowerShell)
+python -m venv .venv; .venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env       # then fill in the keys per SETUP.md
+python -c "from workshop_utils import preflight; preflight()"   # verify
+```
+
+Either way, you want to see `preflight OK -> ...`. Then open
+`notebooks/NB0_build_your_first_agent.ipynb` (VS Code: **Select Kernel** ->
+the `.venv`; or run `uv run jupyter lab notebooks/`).
 
 Any OpenAI-compatible endpoint works - set `OPENAI_BASE_URL` in `.env` to point at
 Azure, a local vLLM/Ollama server, or a corporate proxy. Default model is
