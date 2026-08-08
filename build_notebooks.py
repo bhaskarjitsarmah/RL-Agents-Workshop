@@ -1306,6 +1306,9 @@ def index_hier(skills, collection=COLLECTION):
         qdrant.delete_collection(collection)
     qdrant.create_collection(
         collection, vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE))
+    # Qdrant requires a payload index on any field you FILTER on (level, family).
+    qdrant.create_payload_index(collection, field_name="level", field_schema="keyword")
+    qdrant.create_payload_index(collection, field_name="family", field_schema="keyword")
     points, pid = [], 0
     for fam, members in as_tree(skills).items():
         desc = "covers: " + ", ".join(m["name"] for m in members)
